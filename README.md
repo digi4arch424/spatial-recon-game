@@ -7,7 +7,7 @@
 A web-based, open-source distributed 3D reconstruction engine, gamified across 20 levels.
 Each level is a real subsystem. Each subsystem maps to a real deployment environment.
 
-**Live:** https://digiarch424.github.io/spatial-recon-game/
+**Live:** https://digi4arch424.github.io/spatial-recon-game/
 
 ---
 
