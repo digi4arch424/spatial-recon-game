@@ -81,4 +81,4 @@ To enable on a new repo:
 - Progressive complexity: Browser → Edge → GPU → AI
 
 ## Repo
-https://github.com/DigiArch424/spatial-recon-game
+https://github.com/digi4arch424/spatial-recon-game
