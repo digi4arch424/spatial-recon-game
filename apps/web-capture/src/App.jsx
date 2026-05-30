@@ -1,26 +1,41 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
-import { useWindowSize } from './hooks/useWindowSize'
-
-import { CornerBrackets, Crosshair, ScanLine } from './components/HudOverlays'
-import { Dot, StatBadge, Clock }            from './components/Primitives'
-import { MobilePanel }                      from './components/MobilePanel'
+import { useWindowSize }                              from './hooks/useWindowSize'
+import { useFrameStore }                              from './hooks/useFrameStore'
+import { CornerBrackets, Crosshair, ScanLine,
+         CaptureGuide }                               from './components/HudOverlays'
+import { Dot, StatBadge, Clock }                      from './components/Primitives'
+import { MobilePanel }                                from './components/MobilePanel'
+import { FrameStrip }                                 from './components/FrameStrip'
+import { detectBlur, isDuplicate, getPixelSnapshot }  from './utils/imageAnalysis'
 
 const STATUS = {
   IDLE: 'IDLE', ACQUIRING: 'ACQUIRING',
   LOCKED: 'LOCKED', CAPTURED: 'CAPTURED', ERROR: 'ERROR'
 }
 
+function generateSessionId() {
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`
+}
+
 export default function App() {
-  const videoRef   = useRef(null)
-  const canvasRef  = useRef(null)
-  const streamRef  = useRef(null)
-  const [status,      setStatus]      = useState(STATUS.IDLE)
-  const [captured,    setCaptured]    = useState(null)
-  const [frameCount,  setFrameCount]  = useState(0)
-  const [error,       setError]       = useState(null)
-  const [flash,       setFlash]       = useState(false)
+  const videoRef      = useRef(null)
+  const canvasRef     = useRef(null)
+  const streamRef     = useRef(null)
+  const lastPixelsRef = useRef(null)
+  const sessionId     = useRef(generateSessionId())
+
+  const [status,     setStatus]     = useState(STATUS.IDLE)
+  const [frameCount, setFrameCount] = useState(0)
+  const [error,      setError]      = useState(null)
+  const [flash,      setFlash]      = useState(false)
+  const [dupAlert,   setDupAlert]   = useState(false)
+
   const width    = useWindowSize()
   const isMobile = width < 768
+
+  const {
+    frames, saveFrame, clearSession, deleteFrame, exportZip
+  } = useFrameStore(sessionId.current)
 
   const startCamera = useCallback(async () => {
     setStatus(STATUS.ACQUIRING)
@@ -44,33 +59,50 @@ export default function App() {
     }
   }, [])
 
-  const captureFrame = useCallback(() => {
+  const captureFrame = useCallback(async () => {
     if (!videoRef.current || status !== STATUS.LOCKED) return
     const video  = videoRef.current
     const canvas = canvasRef.current
     canvas.width  = video.videoWidth
     canvas.height = video.videoHeight
     canvas.getContext('2d').drawImage(video, 0, 0)
-    const dataUrl = canvas.toDataURL('image/jpeg', 0.92)
-    setCaptured(dataUrl)
-    setFrameCount(c => c + 1)
+
+    // Near-duplicate suppression
+    if (isDuplicate(canvas, lastPixelsRef.current)) {
+      setDupAlert(true)
+      setTimeout(() => setDupAlert(false), 1200)
+      return
+    }
+
+    // Blur detection
+    const isBlurry = detectBlur(canvas)
+
+    // Save pixel snapshot for next duplicate check
+    lastPixelsRef.current = getPixelSnapshot(canvas)
+
+    const dataUrl     = canvas.toDataURL('image/jpeg', 0.92)
+    const nextCount   = frameCount + 1
+    setFrameCount(nextCount)
     setFlash(true)
     setTimeout(() => setFlash(false), 180)
     setStatus(STATUS.CAPTURED)
-    setTimeout(() => setStatus(STATUS.LOCKED), 1200)
-  }, [status])
+    setTimeout(() => setStatus(STATUS.LOCKED), 800)
 
-  const clearCapture = useCallback(() => setCaptured(null), [])
+    await saveFrame(dataUrl, nextCount, isBlurry)
+  }, [status, frameCount, saveFrame])
 
-  const stopCamera = useCallback(() => {
+  const stopCamera = useCallback(async () => {
     if (streamRef.current) {
       streamRef.current.getTracks().forEach(t => t.stop())
       streamRef.current = null
     }
+    await clearSession()
+    lastPixelsRef.current = null
     setStatus(STATUS.IDLE)
-    setCaptured(null)
     setFrameCount(0)
-  }, [])
+    // Generate new session for next run
+    sessionId.current = generateSessionId()
+  }, [clearSession])
 
   useEffect(() => () => {
     if (streamRef.current) streamRef.current.getTracks().forEach(t => t.stop())
@@ -99,7 +131,7 @@ export default function App() {
           {!isMobile && <div style={{ width: 1, height: 18, background: 'var(--muted)' }} />}
           {!isMobile && <span style={{ fontFamily: 'var(--display)', fontSize: 15, fontWeight: 600, letterSpacing: 4, color: 'var(--text-dim)' }}>SPATIAL RECON</span>}
           <div style={{ padding: '2px 8px', border: '1px solid var(--green-dim)', background: 'rgba(57,232,62,0.06)' }}>
-            <span style={{ fontSize: 10, letterSpacing: 3, color: 'var(--green)' }}>LVL 01</span>
+            <span style={{ fontSize: 10, letterSpacing: 3, color: 'var(--green)' }}>LVL 02</span>
           </div>
         </div>
         {!isMobile && <Clock />}
@@ -109,8 +141,10 @@ export default function App() {
       {!isMobile && (
         <div style={{ padding: '8px 20px', borderBottom: '1px solid var(--muted)', background: 'var(--bg-panel)', display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0 }}>
           <span style={{ fontSize: 9, letterSpacing: 4, color: 'var(--text-dim)' }}>MISSION</span>
-          <span style={{ fontSize: 12, letterSpacing: 2, color: 'var(--text)' }}>CAMERA SPAWN — ACQUIRE SINGLE FRAME</span>
-          <span style={{ marginLeft: 'auto', fontSize: 9, letterSpacing: 3, color: 'var(--text-dim)' }}>MODULE: web-capture</span>
+          <span style={{ fontSize: 12, letterSpacing: 2, color: 'var(--text)' }}>FRAME COLLECTOR — ORBIT SUBJECT, BUILD SESSION</span>
+          <span style={{ marginLeft: 'auto', fontSize: 9, letterSpacing: 3, color: 'var(--text-dim)' }}>
+            SESSION: {sessionId.current}
+          </span>
         </div>
       )}
 
@@ -155,6 +189,8 @@ export default function App() {
               <CornerBrackets color={status === STATUS.CAPTURED ? 'var(--blue)' : 'var(--green)'} />
               <Crosshair active={status === STATUS.LOCKED} />
               <ScanLine scanning={status === STATUS.ACQUIRING} />
+              <CaptureGuide frameCount={frameCount} />
+
               <div style={{ position: 'absolute', top: 20, left: 20, zIndex: 5, pointerEvents: 'none' }}>
                 <div style={{ fontSize: 10, letterSpacing: 3, color: 'rgba(57,232,62,0.8)' }}>REC ●</div>
               </div>
@@ -167,16 +203,24 @@ export default function App() {
             </>
           )}
 
+          {/* Duplicate alert */}
+          {dupAlert && (
+            <div style={{ position: 'absolute', top: '45%', left: '50%', transform: 'translate(-50%,-50%)', zIndex: 10, background: 'rgba(0,0,0,0.75)', padding: '8px 20px', border: '1px solid var(--muted)', pointerEvents: 'none' }}>
+              <span style={{ fontSize: 11, letterSpacing: 3, color: '#f59e0b' }}>⚠ DUPLICATE FRAME — MOVE CAMERA</span>
+            </div>
+          )}
+
           {/* Flash */}
           {flash && <div style={{ position: 'absolute', inset: 0, background: 'white', opacity: 0.7, zIndex: 10, pointerEvents: 'none' }} />}
 
           {/* Mobile panel */}
           {isMobile && (
             <MobilePanel
-              status={status} frameCount={frameCount}
-              captured={captured} statusColor={statusColor} isLive={isLive}
+              status={status} frameCount={frameCount} frames={frames}
+              statusColor={statusColor} isLive={isLive}
               onStart={startCamera} onCapture={captureFrame}
-              onStop={stopCamera} onRetry={startCamera} onClear={clearCapture}
+              onStop={stopCamera} onRetry={startCamera}
+              onDeleteFrame={deleteFrame} onExport={exportZip}
             />
           )}
         </div>
@@ -207,10 +251,10 @@ export default function App() {
 
             {/* Stats */}
             <div style={{ padding: 16, borderBottom: '1px solid var(--muted)', display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
-              <StatBadge label="STATUS" value={status}                             color={statusColor}    />
-              <StatBadge label="FRAMES" value={String(frameCount).padStart(4,'0')} color="var(--green)"  />
-              <StatBadge label="LAYER"  value="L01"                                color="var(--blue)"   />
-              <StatBadge label="MODULE" value="CAM"                                color="var(--text)"   />
+              <StatBadge label="STATUS" value={status}                             color={statusColor}   />
+              <StatBadge label="FRAMES" value={String(frameCount).padStart(4,'0')} color="var(--green)" />
+              <StatBadge label="LAYER"  value="L02"                                color="var(--blue)"  />
+              <StatBadge label="MODULE" value="CAM"                                color="var(--text)"  />
             </div>
 
             {/* Controls */}
@@ -247,34 +291,34 @@ export default function App() {
               )}
             </div>
 
-            {/* Captured thumbnail */}
-            {captured && (
-              <div style={{ flex: 1, padding: 16, display: 'flex', flexDirection: 'column', gap: 10 }}>
-                <div style={{ fontSize: 9, letterSpacing: 4, color: 'var(--text-dim)' }}>LAST CAPTURE</div>
-                <div style={{ position: 'relative', border: '1px solid var(--blue-dim)' }}>
-                  <img src={captured} alt="Captured frame" style={{ width: '100%', display: 'block', opacity: 0.9 }} />
-                  <CornerBrackets color="var(--blue)" size={12} thickness={1} gap={5} />
-                </div>
-                <div style={{ display: 'flex', gap: 8 }}>
-                  <a href={captured} download={`recon-l01-${Date.now()}.jpg`} style={{ flex: 1, padding: '8px 0', textAlign: 'center', background: 'rgba(0,170,255,0.08)', border: '1px solid var(--blue-dim)', color: 'var(--blue)', fontFamily: 'var(--mono)', fontSize: 10, letterSpacing: 2, textDecoration: 'none', display: 'block' }}>↓ SAVE</a>
-                  <button onClick={clearCapture} style={{ flex: 1, padding: '8px 0', background: 'transparent', border: '1px solid var(--muted)', color: 'var(--text-dim)', fontFamily: 'var(--mono)', fontSize: 10, letterSpacing: 2, cursor: 'pointer' }}>✕ CLEAR</button>
-                </div>
-              </div>
-            )}
+            {/* Session info */}
+            <div style={{ padding: '12px 16px', borderBottom: '1px solid var(--muted)' }}>
+              <div style={{ fontSize: 9, letterSpacing: 4, color: 'var(--text-dim)', marginBottom: 6 }}>SESSION</div>
+              <div style={{ fontSize: 9, letterSpacing: 1, color: 'var(--text-dim)', wordBreak: 'break-all' }}>{sessionId.current}</div>
+            </div>
 
             {/* Level progress */}
             <div style={{ marginTop: 'auto', padding: 16, borderTop: '1px solid var(--muted)' }}>
               <div style={{ fontSize: 9, letterSpacing: 4, color: 'var(--text-dim)', marginBottom: 10 }}>LEVEL PROGRESS</div>
               <div style={{ display: 'flex', gap: 4 }}>
                 {Array.from({ length: 20 }, (_, i) => (
-                  <div key={i} style={{ flex: 1, height: 4, background: i === 0 ? 'var(--green)' : 'var(--muted)', opacity: i === 0 ? 1 : 0.4 }} />
+                  <div key={i} style={{ flex: 1, height: 4, background: i < 2 ? 'var(--green)' : 'var(--muted)', opacity: i < 2 ? 1 : 0.4 }} />
                 ))}
               </div>
-              <div style={{ marginTop: 6, fontSize: 9, color: 'var(--text-dim)', letterSpacing: 2 }}>1 / 20</div>
+              <div style={{ marginTop: 6, fontSize: 9, color: 'var(--text-dim)', letterSpacing: 2 }}>2 / 20</div>
             </div>
           </div>
         )}
       </div>
+
+      {/* Frame strip — desktop, full width below main content */}
+      {!isMobile && (
+        <FrameStrip
+          frames={frames}
+          onDelete={deleteFrame}
+          onExport={exportZip}
+        />
+      )}
 
       {/* Bottom status bar — desktop only */}
       {!isMobile && (
@@ -285,7 +329,7 @@ export default function App() {
           <span style={{ color: 'var(--muted)' }}>|</span>
           <span>DESIGN — BUILD — ITERATE</span>
           <span style={{ color: 'var(--muted)' }}>|</span>
-          <span>LAYER: BROWSER / L01</span>
+          <span>LAYER: BROWSER / L02</span>
           <span style={{ marginLeft: 'auto', color: statusColor }}>● {status}</span>
         </div>
       )}
