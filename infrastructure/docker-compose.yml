@@ -1,0 +1,98 @@
+# =============================================================================
+# SPATIAL RECON GAME — Local Development Environment
+# Mirrors the online stack: Supabase → PostgreSQL, Upstash → Redis,
+# Cloudflare R2 → MinIO
+#
+# Usage:
+#   docker compose up -d
+#   docker compose down
+#   docker compose down -v   # also removes volumes (full reset)
+# =============================================================================
+
+services:
+
+  # ── PostgreSQL 16 with pgvector ───────────────────────────────────────────
+  # Online equivalent: Supabase (supabase.com)
+  # Connection: postgresql://postgres:postgres@localhost:5432/spatialrecon
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: spatialrecon-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER:     postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB:       spatialrecon
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./db/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d spatialrecon"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # ── Redis 7 ───────────────────────────────────────────────────────────────
+  # Online equivalent: Upstash (upstash.com) — serverless Redis, free tier
+  # Connection: redis://localhost:6379
+  redis:
+    image: redis:7-alpine
+    container_name: spatialrecon-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # ── MinIO (S3-compatible object storage) ──────────────────────────────────
+  # Online equivalent: Cloudflare R2 (free egress) or AWS S3
+  # S3 endpoint: http://localhost:9000
+  # Console:     http://localhost:9001  (admin / password123)
+  # Bucket:      spatialrecon
+  minio:
+    image: minio/minio:latest
+    container_name: spatialrecon-minio
+    restart: unless-stopped
+    environment:
+      MINIO_ROOT_USER:     admin
+      MINIO_ROOT_PASSWORD: password123
+    ports:
+      - "9000:9000"   # S3 API
+      - "9001:9001"   # Web console
+    volumes:
+      - minio_data:/data
+    command: server /data --console-address ":9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── MinIO bucket init ─────────────────────────────────────────────────────
+  # Creates the spatialrecon bucket on first run
+  minio-init:
+    image: minio/mc:latest
+    container_name: spatialrecon-minio-init
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 admin password123;
+      mc mb --ignore-existing local/spatialrecon;
+      mc anonymous set download local/spatialrecon;
+      echo 'MinIO bucket ready';
+      "
+    restart: "no"
+
+volumes:
+  postgres_data:
+  redis_data:
+  minio_data:
