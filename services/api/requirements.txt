@@ -1,0 +1,19 @@
+# Web framework
+fastapi==0.115.0
+uvicorn[standard]==0.32.0
+
+# Settings and validation
+pydantic-settings==2.6.0
+
+# PostgreSQL async
+sqlalchemy[asyncio]==2.0.36
+asyncpg==0.30.0
+
+# Redis async
+redis[hiredis]==5.2.0
+
+# S3 / object storage
+boto3==1.35.0
+
+# File upload handling
+python-multipart==0.0.12
