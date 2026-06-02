@@ -43,6 +43,7 @@ log = logging.getLogger(__name__)
 
 REDIS_URL             = os.environ['REDIS_URL']
 QUEUE_RECONSTRUCTION  = 'queue:reconstruction'
+QUEUE_MESH            = 'queue:mesh'
 USE_GPU               = os.environ.get('USE_GPU', '0') == '1'
 
 
@@ -58,7 +59,7 @@ def _cameras_s3_key(session_id: str) -> str:
 
 # ── Job processor ─────────────────────────────────────────────────────────────
 
-def process_job(job: dict) -> None:
+def process_job(job: dict, redis_client) -> None:
     """
     Process a single reconstruction job.
 
@@ -118,6 +119,15 @@ def process_job(job: dict) -> None:
         )
         log.info('Status → SFM_COMPLETE')
 
+        # ── 6. Enqueue mesh job ───────────────────────────────────────────
+        mesh_job = {
+            'reconstruction_id': reconstruction_id,
+            'session_id':        session_id,
+            'sparse_cloud_path': sparse_key
+        }
+        redis_client.lpush(QUEUE_MESH, json.dumps(mesh_job))
+        log.info(f'Mesh job enqueued → {QUEUE_MESH}')
+
     except Exception as exc:
         log.error(f'Job failed: {exc}')
         try:
@@ -161,7 +171,7 @@ def main() -> None:
                 continue
             _, raw = result
             job = json.loads(raw)
-            process_job(job)
+            process_job(job, client)
 
         except redis.RedisError as e:
             log.error(f'Redis error: {e} — retrying in 5s')
