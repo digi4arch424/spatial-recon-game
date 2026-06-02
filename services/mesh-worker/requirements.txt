@@ -1,0 +1,15 @@
+# Mesh reconstruction
+open3d==0.18.0
+numpy==1.26.4
+
+# Redis job queue
+redis==5.2.0
+
+# S3 / object storage
+boto3==1.35.0
+
+# API status updates
+httpx==0.27.0
+
+# Environment variables
+python-dotenv==1.0.0
