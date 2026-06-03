@@ -46,11 +46,6 @@ export default function App() {
     status: reconStatus, connected: reconConnected, meshUrl
   } = useReconStatus(reconstructionId)
 
-  // ── Handle upload ─────────────────────────────────────────────────────────
-  const handleUpload = useCallback(() => {
-    upload(sessionId.current, frameCount, getZipBlob)
-  }, [upload, frameCount, getZipBlob])
-
   // ── Camera hardware + capture logic ───────────────────────────────────────
   const {
     videoRef, canvasRef,
@@ -68,6 +63,11 @@ export default function App() {
 
   // ── Scan guidance ─────────────────────────────────────────────────────────
   const guidance = useScanGuidance(frameCount, orientAvailable ? orientation : null)
+
+  // ── Handle upload — must be after useCamera so frameCount is declared ──────
+  const handleUpload = useCallback(() => {
+    upload(sessionId.current, frameCount, getZipBlob)
+  }, [upload, frameCount, getZipBlob])
 
   // ── Stop: hardware + session reset ────────────────────────────────────────
   const handleStop = useCallback(async () => {
