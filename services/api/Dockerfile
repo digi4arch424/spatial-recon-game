@@ -37,7 +37,4 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
 
 # ── Start ─────────────────────────────────────────────────────────────────────
 # 2 workers for the walking skeleton — scale up in production
-CMD ["uvicorn", "services.api.main:app", \
-     "--host", "0.0.0.0", \
-     "--port", "8000", \
-     "--workers", "2"]
+CMD ["sh", "-c", "uvicorn services.api.main:app --host 0.0.0.0 --port ${PORT:-8000} --workers 2"]
