@@ -14,7 +14,7 @@ and 3D model placement.
 
 ---
 
-## Walking Skeleton Status
+## MVP Status
 
 The system is being built as a thin vertical slice first — every layer connected
 end to end before any layer is developed. Current status:
