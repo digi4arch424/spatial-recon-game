@@ -17,17 +17,65 @@ def _s3():
         endpoint_url=S3_ENDPOINT,
         aws_access_key_id=S3_ACCESS_KEY,
         aws_secret_access_key=S3_SECRET_KEY,
-        region_name=S3_REGION
+        region_name=S3_REGION,
     )
 
 
-# ── Download and extract session ZIP ─────────────────────────────────────────
-# The ZIP from the browser has structure:
-#   session-{id}/frame-001-{timestamp}.jpg
-#   session-{id}/frame-002-{timestamp}.jpg
+# ── Manifest-based frame download ─────────────────────────────────────────────
+# Replaces download_and_extract(). Downloads individual frames from S3 using
+# the manifest list provided by the API, rather than a monolithic ZIP.
 #
-# COLMAP needs all images in a flat directory.
-# This function extracts and flattens into dest_dir/images/.
+# Advantages over ZIP:
+#   - No re-download of the full session on retry — only missing frames
+#   - No unzip step — frames land directly in dest_dir/images/
+#   - Works with direct browser PUT upload (no ZIP was ever created)
+
+def download_frames_from_manifest(manifest: list[dict], dest_dir: str) -> str:
+    """
+    Download frames listed in the manifest from S3 into dest_dir/images/.
+
+    Args:
+        manifest:  List of { "frame_number": int, "s3_key": str } dicts,
+                   as provided in the SFM job payload from the API.
+        dest_dir:  Scratch working directory (temp dir from worker).
+
+    Returns:
+        Absolute path to the images directory (dest_dir/images/).
+
+    Raises:
+        ValueError: if manifest is empty or no frames were downloaded.
+        Exception:  propagates S3 download errors for individual frames.
+    """
+    if not manifest:
+        raise ValueError("Frame manifest is empty — nothing to download")
+
+    images_dir = os.path.join(dest_dir, 'images')
+    os.makedirs(images_dir, exist_ok=True)
+
+    client = _s3()
+    downloaded = 0
+
+    for entry in manifest:
+        s3_key       = entry['s3_key']
+        frame_number = entry['frame_number']
+
+        # Preserve the original filename from the S3 key so COLMAP gets
+        # a stable, sortable name regardless of timestamp in the key.
+        filename = os.path.basename(s3_key)
+        local_path = os.path.join(images_dir, filename)
+
+        client.download_file(S3_BUCKET, s3_key, local_path)
+        downloaded += 1
+
+    if downloaded == 0:
+        raise ValueError(f"No frames downloaded — manifest had {len(manifest)} entries but all failed")
+
+    return images_dir
+
+
+# ── Legacy ZIP download (kept for backward compat / local testing) ────────────
+# Used when a job payload has zip_path instead of frame_manifest.
+# Can be removed once all jobs flow through the manifest path.
 
 def download_and_extract(s3_key: str, dest_dir: str) -> str:
     """
@@ -38,10 +86,8 @@ def download_and_extract(s3_key: str, dest_dir: str) -> str:
     images_dir = os.path.join(dest_dir, 'images')
     os.makedirs(images_dir, exist_ok=True)
 
-    # Download
     _s3().download_file(S3_BUCKET, s3_key, zip_path)
 
-    # Extract — flatten nested folder structure
     with zipfile.ZipFile(zip_path, 'r') as zf:
         for member in zf.namelist():
             filename = os.path.basename(member)

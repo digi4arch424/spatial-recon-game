@@ -1,14 +1,17 @@
 """
 SFM Worker — Structure-from-Motion pipeline consumer.
 
-Listens on the Redis reconstruction queue.
+Listens on the Redis SFM queue (queue:sfm, aliased as queue:reconstruction
+for backward compatibility).
+
 For each job:
   1. Update status → SFM_RUNNING
-  2. Download and extract frames from S3
+  2. Download frames from S3 via manifest (or ZIP for legacy jobs)
   3. Run COLMAP SfM pipeline
   4. Upload sparse point cloud + camera poses to S3
   5. Update status → SFM_COMPLETE
-  6. On any failure → update status → FAILED
+  6. Enqueue mesh job → queue:mesh
+  7. On any failure → update status → FAILED
 
 Environment variables required:
   REDIS_URL, S3_ENDPOINT, S3_BUCKET, S3_ACCESS_KEY,
@@ -24,8 +27,8 @@ import logging
 import redis
 from dotenv import load_dotenv
 
-from storage      import download_and_extract, upload_file
-from api          import update_status
+from storage       import download_frames_from_manifest, download_and_extract, upload_file
+from api           import update_status
 from colmap_runner import run_sfm
 
 load_dotenv()
@@ -35,16 +38,17 @@ load_dotenv()
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [SFM-WORKER] %(levelname)s %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S'
+    datefmt='%Y-%m-%d %H:%M:%S',
 )
 log = logging.getLogger(__name__)
 
 # ── Redis ─────────────────────────────────────────────────────────────────────
 
-REDIS_URL             = os.environ['REDIS_URL']
-QUEUE_RECONSTRUCTION  = 'queue:reconstruction'
-QUEUE_MESH            = 'queue:mesh'
-USE_GPU               = os.environ.get('USE_GPU', '0') == '1'
+REDIS_URL  = os.environ['REDIS_URL']
+QUEUE_SFM  = 'queue:sfm'               # primary queue name
+QUEUE_LEGACY = 'queue:reconstruction'  # backward compat — same physical queue via alias
+QUEUE_MESH = 'queue:mesh'
+USE_GPU    = os.environ.get('USE_GPU', '0') == '1'
 
 
 # ── S3 path helpers ───────────────────────────────────────────────────────────
@@ -63,7 +67,20 @@ def process_job(job: dict, redis_client) -> None:
     """
     Process a single reconstruction job.
 
-    Job payload (from sessions router):
+    Accepts two payload shapes:
+
+    Manifest (new — Session 2+):
+    {
+        "reconstruction_id": "uuid",
+        "session_id":        "abc123",
+        "frame_manifest":    [
+            { "frame_number": 1, "s3_key": "sessions/.../frames/frame-001-{ts}.jpg" },
+            ...
+        ],
+        "frame_count":       30
+    }
+
+    Legacy ZIP (old — kept for backward compat / local testing):
     {
         "reconstruction_id": "uuid",
         "session_id":        "abc123",
@@ -73,11 +90,16 @@ def process_job(job: dict, redis_client) -> None:
     """
     reconstruction_id = job['reconstruction_id']
     session_id        = job['session_id']
-    zip_path          = job['zip_path']
+    frame_manifest    = job.get('frame_manifest')   # present in new-style jobs
+    zip_path          = job.get('zip_path')          # present in legacy jobs
 
     log.info(f'Job received — reconstruction={reconstruction_id} session={session_id}')
 
-    # Working directory — cleaned up after job regardless of outcome
+    if frame_manifest:
+        log.info(f'Payload: manifest ({len(frame_manifest)} frames)')
+    else:
+        log.info(f'Payload: legacy ZIP — {zip_path}')
+
     work_dir = tempfile.mkdtemp(prefix=f'sfm_{session_id}_')
 
     try:
@@ -85,16 +107,21 @@ def process_job(job: dict, redis_client) -> None:
         update_status(reconstruction_id, 'SFM_RUNNING')
         log.info('Status → SFM_RUNNING')
 
-        # ── 2. Download + extract frames ──────────────────────────────────
-        log.info(f'Downloading ZIP: {zip_path}')
-        images_dir = download_and_extract(zip_path, work_dir)
+        # ── 2. Download frames ────────────────────────────────────────────
+        if frame_manifest:
+            log.info(f'Downloading {len(frame_manifest)} frames from manifest')
+            images_dir = download_frames_from_manifest(frame_manifest, work_dir)
+        else:
+            log.info(f'Downloading and extracting ZIP: {zip_path}')
+            images_dir = download_and_extract(zip_path, work_dir)
+
         image_count = len([f for f in os.listdir(images_dir) if f.endswith('.jpg')])
-        log.info(f'Extracted {image_count} frames to {images_dir}')
+        log.info(f'Downloaded {image_count} frames to {images_dir}')
 
         if image_count < 3:
             raise ValueError(f'Too few frames for SfM: {image_count} (minimum 3)')
 
-        # ── 3. Run COLMAP ────────────────────────────────────────────────
+        # ── 3. Run COLMAP ─────────────────────────────────────────────────
         log.info(f'Running COLMAP SfM (GPU={USE_GPU})')
         result = run_sfm(work_dir, images_dir, use_gpu=USE_GPU)
         log.info(f'COLMAP complete — registered {result["registered_frames"]} frames')
@@ -104,7 +131,7 @@ def process_job(job: dict, redis_client) -> None:
         cameras_key = _cameras_s3_key(session_id)
 
         log.info(f'Uploading sparse cloud → {sparse_key}')
-        upload_file(result['sparse_ply_path'],   sparse_key)
+        upload_file(result['sparse_ply_path'], sparse_key)
 
         log.info(f'Uploading camera poses → {cameras_key}')
         upload_file(result['cameras_json_path'], cameras_key)
@@ -115,7 +142,7 @@ def process_job(job: dict, redis_client) -> None:
             'SFM_COMPLETE',
             registered_frames=result['registered_frames'],
             sparse_cloud_path=sparse_key,
-            quality_score=_quality_score(result['registered_frames'], image_count)
+            quality_score=_quality_score(result['registered_frames'], image_count),
         )
         log.info('Status → SFM_COMPLETE')
 
@@ -123,7 +150,7 @@ def process_job(job: dict, redis_client) -> None:
         mesh_job = {
             'reconstruction_id': reconstruction_id,
             'session_id':        session_id,
-            'sparse_cloud_path': sparse_key
+            'sparse_cloud_path': sparse_key,
         }
         redis_client.lpush(QUEUE_MESH, json.dumps(mesh_job))
         log.info(f'Mesh job enqueued → {QUEUE_MESH}')
@@ -135,22 +162,17 @@ def process_job(job: dict, redis_client) -> None:
                 reconstruction_id,
                 'FAILED',
                 failed_at_stage='SFM',
-                error_message=str(exc)[:500]
+                error_message=str(exc)[:500],
             )
         except Exception as api_exc:
             log.error(f'Could not update failure status: {api_exc}')
 
     finally:
-        # Always clean up temp directory
         shutil.rmtree(work_dir, ignore_errors=True)
         log.info(f'Cleaned up {work_dir}')
 
 
 def _quality_score(registered: int, total: int) -> int:
-    """
-    Simple quality signal: percentage of frames successfully registered.
-    Below 50% = poor reconstruction. Above 80% = good.
-    """
     if total == 0:
         return 0
     return min(int((registered / total) * 100), 100)
@@ -160,13 +182,14 @@ def _quality_score(registered: int, total: int) -> int:
 
 def main() -> None:
     client = redis.from_url(REDIS_URL, decode_responses=True)
-    log.info(f'SFM Worker started. Listening on {QUEUE_RECONSTRUCTION}')
+    log.info(f'SFM Worker started. Listening on {QUEUE_SFM} (alias: {QUEUE_LEGACY})')
     log.info(f'GPU mode: {USE_GPU}')
 
+    # Listen on queue:sfm. Because QUEUE_RECONSTRUCTION = QUEUE_SFM in queue.py,
+    # both old-style and new-style jobs land on the same Redis list.
     while True:
         try:
-            # BRPOP blocks until a job arrives (timeout=0 = block forever)
-            result = client.brpop(QUEUE_RECONSTRUCTION, timeout=0)
+            result = client.brpop(QUEUE_SFM, timeout=0)
             if not result:
                 continue
             _, raw = result
